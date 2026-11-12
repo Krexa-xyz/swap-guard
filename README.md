@@ -19,7 +19,7 @@ With today's building blocks, the owner adds a context rule for the router and a
 - send the input token straight to any address, up to the daily cap;
 - swap through a pool the attacker made with a worthless token, with `amount_out_min = 0`.
 
-Both are shown by passing tests in [`contracts/swap-guard/src/test.rs`](contracts/swap-guard/src/test.rs) (`gap_*`). The tests run the real OZ `__check_auth` with the contexts a Soroswap swap produces.
+Both are shown with real funds in [`contracts/swap-guard/src/e2e.rs`](contracts/swap-guard/src/e2e.rs) (`e2e_gap_*`): Soroswap's own published router, factory and pair contracts, Stellar Asset Contract tokens, and signed auth entries checked by the smart account's real `__check_auth`. In the first test the attacker receives 900 USDC; in the second the account's USDC ends up in the attacker's pool and the attacker withdraws it.
 
 ## What Swap Guard checks
 
@@ -27,7 +27,7 @@ Install the same policy on the router rule and on each input-token rule.
 
 | Context | Rule |
 |---|---|
-| Router | only `swap_exact_tokens_for_tokens`; `to` is the account; every token in `path` is on the allowlist; `amount_in` ≤ per-swap cap; `amount_out_min` at or above the **owner-set rate floor** for that direction (no floor → refused), and within `max_slippage_bps` of the router's `router_get_amounts_out` quote |
+| Router | only `swap_exact_tokens_for_tokens`; `to` is the account; every token in `path` is on the allowlist; `amount_in` ≤ per-swap cap; `amount_out_min` at or above the **owner-set minimum rate** for that direction (no rate set → refused) |
 | Input token | only `transfer`, only inside an approved swap in the same ledger, only to that swap's first pair, for exactly its `amount_in` |
 
 It reuses what already exists instead of rebuilding it:
@@ -39,7 +39,7 @@ It reuses what already exists instead of rebuilding it:
 ## Build and test
 
 ```sh
-cargo test                 # 17 tests
+cargo test                 # 26 tests: 17 unit, 9 end-to-end on Soroswap's contracts
 stellar contract build     # wasm (stellar-cli 25.2+)
 ```
 
@@ -47,13 +47,14 @@ stellar contract build     # wasm (stellar-cli 25.2+)
 
 | | |
 |---|---|
-| Swap Guard policy | [`CAQ5J33TEGVCZAQHC4OAF7AK2JYFOLIHNLMXLWGVJXBLQQSUOMXO5AEU`](https://stellar.expert/explorer/testnet/contract/CAQ5J33TEGVCZAQHC4OAF7AK2JYFOLIHNLMXLWGVJXBLQQSUOMXO5AEU) |
+| Swap Guard policy | [`CCCRDWE6WH7DACT5TMW5AYN6EPAFLABNBAS2SK5E7MQVYQNOX2UZGS6M`](https://stellar.expert/explorer/testnet/contract/CCCRDWE6WH7DACT5TMW5AYN6EPAFLABNBAS2SK5E7MQVYQNOX2UZGS6M) |
 
 ## Roadmap (30-day sprint)
 
 - [x] Gap tests against OZ `spending_limit`
 - [x] Policy contract + unit tests, deployed to testnet
-- [ ] Property tests; end-to-end testnet swaps through the Soroswap testnet router (allowed and refused tx hashes)
+- [x] End-to-end tests on Soroswap's published contracts with real tokens and signed auth
+- [ ] Property tests; multi-hop; live testnet swaps through the Soroswap testnet router (allowed and refused tx hashes)
 - [ ] TypeScript helper on the Smart Account Kit (session key made on the user's device)
 - [ ] Testnet reference app, integration guide, threat model
 
@@ -61,7 +62,7 @@ stellar contract build     # wasm (stellar-cli 25.2+)
 
 - Owner: passkey signer on the user's device. Only the owner changes limits or revokes.
 - Session key: made and kept on the user's device. No server holds or signs for user accounts.
-- No oracle, relayer, keeper or admin key. The live router quote can be moved inside the same transaction (an attacker contract can push the pool price, call the router for the account, and push it back), so the hard floor is an **owner-set minimum rate per direction**. The quote is a second, looser check. The token allowlist keeps the key off attacker-made pools.
+- No oracle, relayer, keeper or admin key. The price limit is an **owner-set minimum rate per direction**. A live pool quote is not used: it can be moved inside the same transaction, and the policy cannot call the router anyway (the router is still running when it asks for authorization, and Soroban forbids re-entry). The token allowlist keeps the key off attacker-made pools.
 - Worst case if a session key leaks: swaps between allowlisted tokens, within the per-swap and daily caps, at no worse than the owner's rate floor, with output returned to the account, until the owner revokes or the rule expires.
 
 ## License

@@ -30,7 +30,7 @@ use crate::{RateFloor, SwapGuard, SwapGuardClient, SwapGuardError, SwapGuardPara
 
 /// Minimal OZ smart account (same as OZ's multisig example, minus upgrades).
 #[contract]
-struct Account;
+pub struct Account;
 
 #[contractimpl]
 impl Account {
@@ -65,7 +65,7 @@ impl SmartAccount for Account {}
 
 /// OZ spending_limit, wrapped as a contract (same as OZ's example).
 #[contract]
-struct SpendingLimit;
+pub struct SpendingLimit;
 
 #[contractimpl]
 impl Policy for SpendingLimit {
@@ -84,7 +84,7 @@ impl Policy for SpendingLimit {
 /// Signature verifier that accepts every signature. Signature checking is
 /// OZ's job and is not what these tests are about.
 #[contract]
-struct OkVerifier;
+pub struct OkVerifier;
 
 #[contractimpl]
 impl OkVerifier {
@@ -114,7 +114,7 @@ impl MockRouter {
         e.storage().instance().set(&(a.clone(), b.clone()), &pair);
         e.storage().instance().set(&(b, a), &pair);
     }
-    pub fn router_pair_for(e: Env, token_a: Address, token_b: Address) -> Address {
+    pub fn get_pair(e: Env, token_a: Address, token_b: Address) -> Address {
         e.storage().instance().get(&(token_a, token_b)).unwrap()
     }
     pub fn router_get_amounts_out(e: Env, amount_in: i128, path: Vec<Address>) -> Vec<i128> {
@@ -172,9 +172,9 @@ fn setup(with_guard: bool) -> T {
     let guard = e.register(SwapGuard, ());
     let gp = SwapGuardParams {
         router: router.clone(),
+        factory: router.clone(), // the double also answers get_pair
         allowed_tokens: vec![&e, usdc.clone(), xlm.clone()],
         max_amount_in: PER_SWAP_CAP,
-        max_slippage_bps: 100,
         // Owner floor: at least 1.9 XLM per USDC (fair price is 2.0).
         floors: vec![&e, RateFloor { token_in: usdc.clone(), token_out: xlm.clone(), min_out_per_unit: 19 * UNIT / 10 }],
     };
@@ -444,10 +444,10 @@ fn install_rejects_bad_params() {
         valid_until: None,
     };
     let bad = SwapGuardParams {
-        router,
+        router: router.clone(),
+        factory: router,
         allowed_tokens: vec![&e, Address::generate(&e)],
         max_amount_in: 0,
-        max_slippage_bps: 100,
         floors: Vec::new(&e),
     };
     let r = SwapGuardClient::new(&e, &guard).try_install(&bad, &rule, &Address::generate(&e));
@@ -471,11 +471,6 @@ fn refusals_come_from_the_expected_check() {
     assert_eq!(
         c(vec![&t.e, swap_ctx(&t, 400, 0, usdc_xlm.clone(), &t.account), transfer_ctx(&t, &t.usdc, &t.usdc_xlm_pair, 400)]),
         Some(SwapGuardError::BelowOwnerFloor as u32)
-    );
-    // Meets the owner floor (760) but is looser than 1% under a fair quote (792).
-    assert_eq!(
-        c(vec![&t.e, swap_ctx(&t, 400, 760, usdc_xlm.clone(), &t.account), transfer_ctx(&t, &t.usdc, &t.usdc_xlm_pair, 400)]),
-        Some(SwapGuardError::SlippageTooHigh as u32)
     );
     assert_eq!(
         c(vec![&t.e, swap_ctx(&t, 501, 1000, usdc_xlm.clone(), &t.account), transfer_ctx(&t, &t.usdc, &t.usdc_xlm_pair, 501)]),

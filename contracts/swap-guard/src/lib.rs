@@ -9,8 +9,8 @@
 //! * the rule for the **router** (`CallContract(router)`): the session key may
 //!   only call `swap_exact_tokens_for_tokens`, with `to` equal to the smart
 //!   account, every token in `path` on the allowlist, `amount_in` at or below
-//!   the per-swap cap, and `amount_out_min` within `max_slippage_bps` of the
-//!   router's own on-chain quote;
+//!   the per-swap cap, and `amount_out_min` at or above the owner's minimum
+//!   rate for that direction;
 //! * the rule for each **input token** (`CallContract(token)`): the session key
 //!   may only `transfer` that token when the same authorization also contains
 //!   a guarded router swap, and only to that swap's first pair, for exactly
@@ -37,11 +37,12 @@ use stellar_accounts::{
     smart_account::{ContextRule, ContextRuleType, Signer},
 };
 
-/// Subset of the Soroswap router interface that the policy reads.
-#[contractclient(name = "SoroswapRouterClient")]
-pub trait SoroswapRouter {
-    fn router_get_amounts_out(e: Env, amount_in: i128, path: Vec<Address>) -> Vec<i128>;
-    fn router_pair_for(e: Env, token_a: Address, token_b: Address) -> Address;
+/// Subset of the Soroswap factory interface that the policy reads. The policy
+/// must not call the router: the router is still running when it asks the
+/// account for authorization, and Soroban forbids re-entering it.
+#[contractclient(name = "SoroswapFactoryClient")]
+pub trait SoroswapFactory {
+    fn get_pair(e: Env, token_a: Address, token_b: Address) -> Address;
 }
 
 #[contracterror]
@@ -58,7 +59,6 @@ pub enum SwapGuardError {
     RecipientNotAccount = 4107,
     TokenNotAllowed = 4108,
     AmountTooLarge = 4109,
-    SlippageTooHigh = 4110,
     BelowOwnerFloor = 4113,
     NoFloorForPair = 4114,
     TransferWithoutSwap = 4111,
@@ -72,17 +72,16 @@ pub enum SwapGuardError {
 pub struct SwapGuardParams {
     /// Soroswap router the session key may call.
     pub router: Address,
+    /// Soroswap factory of that router (used to find pair addresses).
+    pub factory: Address,
     /// Tokens that may appear anywhere in a swap path.
     pub allowed_tokens: Vec<Address>,
     /// Largest `amount_in` for one swap.
     pub max_amount_in: i128,
-    /// Largest accepted gap between the router quote and `amount_out_min`,
-    /// in basis points (100 = 1%).
-    pub max_slippage_bps: u32,
-    /// Owner-set minimum output for each swap direction. The live router
-    /// quote can be moved inside the same transaction (an attacker contract
-    /// can push the pool price, call the router for the account, and push it
-    /// back), so the quote alone is not a safe floor. Swaps with no floor for
+    /// Owner-set minimum output for each swap direction. This is the price
+    /// limit. A live pool quote is not used: it can be moved inside the same
+    /// transaction (an attacker contract can push the pool price, call the
+    /// router for the account, and push it back). Swaps with no floor for
     /// their (first token, last token) are refused.
     pub floors: Vec<RateFloor>,
 }
@@ -121,8 +120,6 @@ enum Key {
     Params(Address, u32),
     Pending(Address),
 }
-
-const BPS: i128 = 10_000;
 
 fn swap_fn(e: &Env) -> Symbol {
     Symbol::new(e, "swap_exact_tokens_for_tokens")
@@ -175,20 +172,9 @@ fn enforce_swap(e: &Env, p: &SwapGuardParams, fn_name: &Symbol, args: &Vec<sorob
         panic_with_error!(e, SwapGuardError::BelowOwnerFloor)
     }
 
-    // Second check against the live quote. It cannot stop a price moved in
-    // the same transaction (the floor above does that), but it refuses
-    // needlessly loose minimums when the pool is fair.
-    let router = SoroswapRouterClient::new(e, &p.router);
-    let quote = router.router_get_amounts_out(&amount_in, &path);
-    let quoted_out = quote.last().unwrap_or_else(|| panic_with_error!(e, SwapGuardError::BadArguments));
-    // amount_out_min >= quoted_out * (1 - bps)
-    if amount_out_min * BPS < quoted_out * (BPS - p.max_slippage_bps as i128) {
-        panic_with_error!(e, SwapGuardError::SlippageTooHigh)
-    }
-
     let pending = PendingTransfer {
         token: path.get_unchecked(0),
-        pair: router.router_pair_for(&path.get_unchecked(0), &path.get_unchecked(1)),
+        pair: SoroswapFactoryClient::new(e, &p.factory).get_pair(&path.get_unchecked(0), &path.get_unchecked(1)),
         amount: amount_in,
         ledger: e.ledger().sequence(),
     };
@@ -256,7 +242,6 @@ impl Policy for SwapGuard {
     fn install(e: &Env, p: SwapGuardParams, context_rule: ContextRule, smart_account: Address) {
         smart_account.require_auth();
         if p.max_amount_in <= 0
-            || p.max_slippage_bps > 10_000
             || p.allowed_tokens.len() < 2
             || p.floors.is_empty()
             || p.floors.iter().any(|f| f.min_out_per_unit <= 0)
@@ -289,3 +274,5 @@ impl SwapGuard {
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod e2e;
