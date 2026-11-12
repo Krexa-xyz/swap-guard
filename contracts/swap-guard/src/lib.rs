@@ -59,6 +59,8 @@ pub enum SwapGuardError {
     TokenNotAllowed = 4108,
     AmountTooLarge = 4109,
     SlippageTooHigh = 4110,
+    BelowOwnerFloor = 4113,
+    NoFloorForPair = 4114,
     TransferWithoutSwap = 4111,
     TransferMismatch = 4112,
 }
@@ -77,10 +79,32 @@ pub struct SwapGuardParams {
     /// Largest accepted gap between the router quote and `amount_out_min`,
     /// in basis points (100 = 1%).
     pub max_slippage_bps: u32,
+    /// Owner-set minimum output for each swap direction. The live router
+    /// quote can be moved inside the same transaction (an attacker contract
+    /// can push the pool price, call the router for the account, and push it
+    /// back), so the quote alone is not a safe floor. Swaps with no floor for
+    /// their (first token, last token) are refused.
+    pub floors: Vec<RateFloor>,
 }
 
+/// `amount_out_min` must be at least `amount_in * min_out_per_unit / UNIT`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RateFloor {
+    pub token_in: Address,
+    pub token_out: Address,
+    /// Minimum output for `UNIT` (10^7) of input, in output base units.
+    pub min_out_per_unit: i128,
+}
+
+pub const UNIT: i128 = 10_000_000;
+
 /// A swap approved on the router rule, waiting for its matching token
-/// transfer inside the same `__check_auth` call.
+/// transfer. Soroswap's router always makes that transfer inside the same
+/// invocation, so the approval is consumed in the same transaction; a failed
+/// transaction reverts it. It is also bound to the ledger, the pair and the
+/// exact amount. A policy cannot see the auth payload hash or sibling
+/// contexts, so this is the narrowest binding available to it.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingTransfer {
@@ -140,6 +164,20 @@ fn enforce_swap(e: &Env, p: &SwapGuardParams, fn_name: &Symbol, args: &Vec<sorob
         panic_with_error!(e, SwapGuardError::AmountTooLarge)
     }
 
+    let token_in = path.get_unchecked(0);
+    let token_out = path.get_unchecked(path.len() - 1);
+    let floor = p
+        .floors
+        .iter()
+        .find(|f| f.token_in == token_in && f.token_out == token_out)
+        .unwrap_or_else(|| panic_with_error!(e, SwapGuardError::NoFloorForPair));
+    if amount_out_min * UNIT < amount_in * floor.min_out_per_unit {
+        panic_with_error!(e, SwapGuardError::BelowOwnerFloor)
+    }
+
+    // Second check against the live quote. It cannot stop a price moved in
+    // the same transaction (the floor above does that), but it refuses
+    // needlessly loose minimums when the pool is fair.
     let router = SoroswapRouterClient::new(e, &p.router);
     let quote = router.router_get_amounts_out(&amount_in, &path);
     let quoted_out = quote.last().unwrap_or_else(|| panic_with_error!(e, SwapGuardError::BadArguments));
@@ -217,7 +255,12 @@ impl Policy for SwapGuard {
 
     fn install(e: &Env, p: SwapGuardParams, context_rule: ContextRule, smart_account: Address) {
         smart_account.require_auth();
-        if p.max_amount_in <= 0 || p.max_slippage_bps > 10_000 || p.allowed_tokens.len() < 2 {
+        if p.max_amount_in <= 0
+            || p.max_slippage_bps > 10_000
+            || p.allowed_tokens.len() < 2
+            || p.floors.is_empty()
+            || p.floors.iter().any(|f| f.min_out_per_unit <= 0)
+        {
             panic_with_error!(e, SwapGuardError::InvalidParams)
         }
         match &context_rule.context_type {

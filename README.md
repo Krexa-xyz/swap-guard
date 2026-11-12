@@ -27,7 +27,7 @@ Install the same policy on the router rule and on each input-token rule.
 
 | Context | Rule |
 |---|---|
-| Router | only `swap_exact_tokens_for_tokens`; `to` is the account; every token in `path` is on the allowlist; `amount_in` ≤ per-swap cap; `amount_out_min` within `max_slippage_bps` of the router's own `router_get_amounts_out` quote |
+| Router | only `swap_exact_tokens_for_tokens`; `to` is the account; every token in `path` is on the allowlist; `amount_in` ≤ per-swap cap; `amount_out_min` at or above the **owner-set rate floor** for that direction (no floor → refused), and within `max_slippage_bps` of the router's `router_get_amounts_out` quote |
 | Input token | only `transfer`, only inside an approved swap in the same ledger, only to that swap's first pair, for exactly its `amount_in` |
 
 It reuses what already exists instead of rebuilding it:
@@ -39,7 +39,7 @@ It reuses what already exists instead of rebuilding it:
 ## Build and test
 
 ```sh
-cargo test                 # 15 tests
+cargo test                 # 17 tests
 stellar contract build     # wasm (stellar-cli 25.2+)
 ```
 
@@ -47,7 +47,7 @@ stellar contract build     # wasm (stellar-cli 25.2+)
 
 | | |
 |---|---|
-| Swap Guard policy | [`CBF6KNLMTKPUSRJIWZNJTMW24JTZQKWGX6TUAKPITQTGS7BXXDBWP2JT`](https://stellar.expert/explorer/testnet/contract/CBF6KNLMTKPUSRJIWZNJTMW24JTZQKWGX6TUAKPITQTGS7BXXDBWP2JT) |
+| Swap Guard policy | [`CAQ5J33TEGVCZAQHC4OAF7AK2JYFOLIHNLMXLWGVJXBLQQSUOMXO5AEU`](https://stellar.expert/explorer/testnet/contract/CAQ5J33TEGVCZAQHC4OAF7AK2JYFOLIHNLMXLWGVJXBLQQSUOMXO5AEU) |
 
 ## Roadmap (30-day sprint)
 
@@ -61,8 +61,8 @@ stellar contract build     # wasm (stellar-cli 25.2+)
 
 - Owner: passkey signer on the user's device. Only the owner changes limits or revokes.
 - Session key: made and kept on the user's device. No server holds or signs for user accounts.
-- No oracle, relayer, keeper or admin key. Slippage is checked against the router's own on-chain quote, so it limits loss against the current pool price; it does not stop a price that was moved before the swap. The token allowlist keeps the key off attacker-made pools.
-- Worst case if a session key leaks: swaps between allowlisted tokens, within the per-swap and daily caps, at no worse than the set slippage from the pool price at that moment, with output returned to the account, until the owner revokes or the rule expires.
+- No oracle, relayer, keeper or admin key. The live router quote can be moved inside the same transaction (an attacker contract can push the pool price, call the router for the account, and push it back), so the hard floor is an **owner-set minimum rate per direction**. The quote is a second, looser check. The token allowlist keeps the key off attacker-made pools.
+- Worst case if a session key leaks: swaps between allowlisted tokens, within the per-swap and daily caps, at no worse than the owner's rate floor, with output returned to the account, until the owner revokes or the rule expires.
 
 ## License
 

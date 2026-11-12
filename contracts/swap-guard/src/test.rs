@@ -24,7 +24,7 @@ use stellar_accounts::{
     },
 };
 
-use crate::{SwapGuard, SwapGuardClient, SwapGuardError, SwapGuardParams};
+use crate::{RateFloor, SwapGuard, SwapGuardClient, SwapGuardError, SwapGuardParams, UNIT};
 
 // ---------- test doubles ----------
 
@@ -106,6 +106,10 @@ struct MockRouter;
 
 #[contractimpl]
 impl MockRouter {
+    /// Output per input, in percent of the fair 1:2 price (100 = fair).
+    pub fn set_price_pct(e: Env, pct: i128) {
+        e.storage().instance().set(&soroban_sdk::symbol_short!("pct"), &pct);
+    }
     pub fn set_pair(e: Env, a: Address, b: Address, pair: Address) {
         e.storage().instance().set(&(a.clone(), b.clone()), &pair);
         e.storage().instance().set(&(b, a), &pair);
@@ -116,8 +120,9 @@ impl MockRouter {
     pub fn router_get_amounts_out(e: Env, amount_in: i128, path: Vec<Address>) -> Vec<i128> {
         let mut out = vec![&e, amount_in];
         let mut x = amount_in;
+        let pct: i128 = e.storage().instance().get(&soroban_sdk::symbol_short!("pct")).unwrap_or(100);
         for _ in 1..path.len() {
-            x *= 2;
+            x = x * 2 * pct / 100;
             out.push_back(x);
         }
         out
@@ -170,6 +175,8 @@ fn setup(with_guard: bool) -> T {
         allowed_tokens: vec![&e, usdc.clone(), xlm.clone()],
         max_amount_in: PER_SWAP_CAP,
         max_slippage_bps: 100,
+        // Owner floor: at least 1.9 XLM per USDC (fair price is 2.0).
+        floors: vec![&e, RateFloor { token_in: usdc.clone(), token_out: xlm.clone(), min_out_per_unit: 19 * UNIT / 10 }],
     };
     let sl = spending_limit::SpendingLimitAccountParams {
         spending_limit: DAILY_CAP,
@@ -441,6 +448,7 @@ fn install_rejects_bad_params() {
         allowed_tokens: vec![&e, Address::generate(&e)],
         max_amount_in: 0,
         max_slippage_bps: 100,
+        floors: Vec::new(&e),
     };
     let r = SwapGuardClient::new(&e, &guard).try_install(&bad, &rule, &Address::generate(&e));
     assert_eq!(r.err().unwrap().ok().unwrap(), SwapGuardError::InvalidParams.into());
@@ -462,6 +470,11 @@ fn refusals_come_from_the_expected_check() {
     );
     assert_eq!(
         c(vec![&t.e, swap_ctx(&t, 400, 0, usdc_xlm.clone(), &t.account), transfer_ctx(&t, &t.usdc, &t.usdc_xlm_pair, 400)]),
+        Some(SwapGuardError::BelowOwnerFloor as u32)
+    );
+    // Meets the owner floor (760) but is looser than 1% under a fair quote (792).
+    assert_eq!(
+        c(vec![&t.e, swap_ctx(&t, 400, 760, usdc_xlm.clone(), &t.account), transfer_ctx(&t, &t.usdc, &t.usdc_xlm_pair, 400)]),
         Some(SwapGuardError::SlippageTooHigh as u32)
     );
     assert_eq!(
@@ -476,4 +489,34 @@ fn refusals_come_from_the_expected_check() {
         c(vec![&t.e, swap_ctx(&t, 100, 198, usdc_xlm.clone(), &t.account), transfer_ctx(&t, &t.usdc, &t.usdc_xlm_pair, 400)]),
         Some(SwapGuardError::TransferMismatch as u32)
     );
+}
+
+#[test]
+fn guard_blocks_same_transaction_price_manipulation() {
+    let t = setup(true);
+    // An attacker contract pushes the pool price down 50% in the same
+    // transaction, so the live quote agrees with a very low amount_out_min.
+    MockRouterClient::new(&t.e, &t.router).set_price_pct(&50);
+    let r = code(
+        &t,
+        vec![
+            &t.e,
+            swap_ctx(&t, 400, 396, vec![&t.e, t.usdc.clone(), t.xlm.clone()], &t.account),
+            transfer_ctx(&t, &t.usdc, &t.usdc_xlm_pair, 400),
+        ],
+        vec![&t.e, t.router_rule, t.usdc_rule],
+    );
+    assert_eq!(r, Some(SwapGuardError::BelowOwnerFloor as u32));
+}
+
+#[test]
+fn guard_blocks_direction_without_a_floor() {
+    let t = setup(true);
+    // XLM -> USDC has no owner floor, so it is refused.
+    let r = code(
+        &t,
+        vec![&t.e, swap_ctx(&t, 400, 800, vec![&t.e, t.xlm.clone(), t.usdc.clone()], &t.account)],
+        vec![&t.e, t.router_rule],
+    );
+    assert_eq!(r, Some(SwapGuardError::NoFloorForPair as u32));
 }
